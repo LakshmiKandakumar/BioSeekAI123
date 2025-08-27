@@ -1,0 +1,9 @@
+flask==2.3.3
+flask-cors==4.0.0
+groq==0.4.1
+pymupdf==1.23.14
+sentence-transformers==2.2.2
+torch==2.1.0
+requests==2.31.0
+python-dotenv==1.0.0
+gunicorn==21.2.0
