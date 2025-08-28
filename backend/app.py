@@ -11,37 +11,142 @@ from dotenv import load_dotenv
 load_dotenv("key.env")
 
 app = Flask(__name__)
-# app.secret_key = os.getenv("FLASK_SECRET_KEY", "supersecretkey")
-
 CORS(app)  # Allow all origins for deployment
 
-# Initialize Groq client
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+# Initialize Groq client with better error handling
+try:
+    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    print(f"✅ Groq client initialized")
+except Exception as e:
+    print(f"❌ Failed to initialize Groq client: {e}")
+    client = None
+
+# Updated model candidates with correct model names
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+_MODEL_CANDIDATES = [
+    "llama-3.1-8b-instant",
+    "llama3-8b-8192", 
+    "mixtral-8x7b-32768",
+    "llama3-70b-8192"
+]
+
+def _groq_chat(messages):
+    if not client:
+        raise RuntimeError("Groq client not initialized - check your API key")
+    
+    last_error = None
+    
+    for model_name in _MODEL_CANDIDATES:
+        try:
+            print(f"🔄 Trying model: {model_name}")
+            
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                max_tokens=1000,  # Add max tokens limit
+                temperature=0.7   # Add temperature for consistency
+            )
+            
+            print(f"✅ Success with model: {model_name}")
+            return resp
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ Model {model_name} failed: {error_msg}")
+            last_error = e
+            
+            # If it's a 404 error, the model doesn't exist - try next one
+            if "404" in error_msg or "Not Found" in error_msg:
+                continue
+            # If it's a rate limit or quota issue, try next model
+            elif "rate_limit" in error_msg.lower() or "quota" in error_msg.lower():
+                continue
+            # For other errors, also try next model
+            else:
+                continue
+    
+    # If all models failed, raise the last error with more context
+    raise RuntimeError(f"All Groq models failed. Last error: {last_error}")
 
 # Add health check endpoint for Azure App Service
 @app.route("/health", methods=["GET"])
 def health_check():
-    return jsonify({"status": "healthy", "message": "BioSeekAI backend is running"})
+    return jsonify({
+        "status": "healthy", 
+        "message": "BioSeekAI backend is running",
+        "groq_client": "initialized" if client else "failed",
+        "models": _MODEL_CANDIDATES
+    })
+
+# Test endpoint to check Groq API
+@app.route("/test-groq", methods=["GET"])
+def test_groq():
+    try:
+        if not client:
+            return jsonify({"error": "Groq client not initialized"}), 500
+        
+        response = _groq_chat([{"role": "user", "content": "Hello, say 'API working'"}])
+        reply = response.choices[0].message.content
+        
+        return jsonify({
+            "status": "success", 
+            "reply": reply,
+            "model_used": response.model
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error", 
+            "error": str(e)
+        }), 500
 
 # -------------------- CHAT --------------------
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json()
     user_input = data.get("message", "").strip()
+    
     if not user_input:
         return jsonify({"reply": "Please provide a message"}), 400
 
-    try:
-        response = client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[{"role": "user", "content": user_input}],
-        )
-        reply = response.choices[0].message.content
-    except Exception as e:
-        reply = f"❌ Error: {str(e)}"
+    # Check if Groq client is initialized
+    if not client:
+        return jsonify({
+            "reply": "❌ Error: Groq API client not initialized. Check your API key."
+        }), 500
 
-    print(f"[CHAT] {user_input} -> {reply}")
-    return jsonify({"reply": reply})
+    try:
+        print(f"🔄 Processing chat request: {user_input[:50]}...")
+        
+        response = _groq_chat(messages=[{
+            "role": "user", 
+            "content": user_input
+        }])
+        
+        reply = response.choices[0].message.content
+        model_used = getattr(response, 'model', 'unknown')
+        
+        print(f"✅ Chat response generated using model: {model_used}")
+        
+        return jsonify({
+            "reply": reply,
+            "model": model_used
+        })
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Chat error: {error_msg}")
+        
+        # Return more specific error messages
+        if "API key" in error_msg or "unauthorized" in error_msg.lower():
+            reply = "❌ Error: Invalid or missing Groq API key"
+        elif "rate_limit" in error_msg.lower():
+            reply = "❌ Error: Groq API rate limit exceeded. Please try again later."
+        elif "quota" in error_msg.lower():
+            reply = "❌ Error: Groq API quota exceeded"
+        else:
+            reply = f"❌ Error: {error_msg}"
+        
+        return jsonify({"reply": reply}), 500
 
 # -------------------- PDF UPLOAD --------------------
 @app.route("/upload", methods=["POST"])
@@ -57,15 +162,14 @@ def upload():
         return jsonify({"summary": "⚠ No text found in the PDF."})
 
     try:
-        response = client.chat.completions.create(
-            model="llama3-8b-8192",
+        response = _groq_chat(
             messages=[
                 {
                     "role": "system",
                     "content": "You are a helpful assistant that summarizes PDF documents."
                 },
                 {"role": "user", "content": f"Summarize this document:\n\n{text[:4000]}"},
-            ],
+            ]
         )
         summary = response.choices[0].message.content
     except Exception as e:
@@ -112,7 +216,8 @@ def search():
 
 # -------------------- MAIN --------------------
 if __name__ == "__main__":
-    # Use 0.0.0.0 to allow external access when deployed
     port = int(os.environ.get("PORT", 8000))
+    print(f"🚀 Starting BioSeekAI backend on port {port}")
+    print(f"📊 Available Groq models: {_MODEL_CANDIDATES}")
     app.run(host="0.0.0.0", port=port, debug=False)
 
