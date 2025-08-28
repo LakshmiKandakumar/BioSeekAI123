@@ -4,18 +4,58 @@ import xml.etree.ElementTree as ET
 import requests
 import os
 from dotenv import load_dotenv
-from groq import Groq
+import google.generativeai as genai
 
 # ---------------- CONFIG ----------------
 
 load_dotenv("key.env")
 
 API_KEY = os.getenv("PUBMED_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBys3qxTdGbxJFwXDPLnaP9VUcOO7fvCxU")
 HF_API_KEY = os.getenv("HF_API_KEY")
 
-# Initialize Groq client
-groq_client = Groq(api_key=GROQ_API_KEY)
+# Initialize Gemini client
+try:
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+    print("✅ Gemini client initialized in Model.py")
+except Exception as e:
+    print(f"❌ Failed to initialize Gemini in Model.py: {e}")
+    gemini_model = None
+
+def _gemini_chat(messages):
+    if not gemini_model:
+        raise RuntimeError("Gemini client not initialized in Model.py")
+    
+    try:
+        # Convert messages to simple prompt for Gemini
+        if len(messages) == 1 and messages[0].get("role") == "user":
+            prompt = messages[0]["content"]
+        else:
+            prompt = ""
+            for msg in messages:
+                if msg["role"] == "user":
+                    prompt += msg["content"]
+        
+        response = gemini_model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                max_output_tokens=500,
+                temperature=0.3,
+            )
+        )
+        
+        # Create response object similar to Groq format
+        class GeminiResponse:
+            def __init__(self, text):
+                self.choices = [type('obj', (object,), {
+                    'message': type('obj', (object,), {'content': text})()
+                })()]
+        
+        return GeminiResponse(response.text)
+        
+    except Exception as e:
+        raise RuntimeError(f"Gemini API failed in Model.py: {e}")
 
 CANDIDATE_RETMAX = 100  # fetch top 100 articles from PubMed
 TOP_N = 10
@@ -70,11 +110,11 @@ def map_to_mesh(term: str) -> str | None:
         return None
 
 
-# ---------------- GROQ + MESH EXTRACTION ----------------
+# ---------------- GEMINI + MESH EXTRACTION ----------------
 
 def extract_topic_with_groq(user_query: str) -> str:
     """
-    Uses Groq API to extract a main biomedical topic and map it to MeSH.
+    Uses Gemini API to extract a main biomedical topic and map it to MeSH.
     """
     prompt = f"""
     You are a biomedical research assistant.
@@ -85,15 +125,12 @@ def extract_topic_with_groq(user_query: str) -> str:
     """
 
     try:
-        response = groq_client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=50,
-            temperature=0.1
+        response = _gemini_chat(
+            messages=[{"role": "user", "content": prompt}]
         )
         topic = response.choices[0].message.content.strip()
     except Exception as e:
-        print("Error calling Groq API:", e)
+        print("Error calling Gemini API:", e)
         topic = user_query  # fallback
 
     # Map to official MeSH term if available
