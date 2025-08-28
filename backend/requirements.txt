@@ -2,6 +2,6 @@ requests
 python-dotenv
 flask
 flask-cors
-groq
+google-generativeai
 pymupdf
 numpy
