@@ -104,49 +104,23 @@ def test_groq():
 def chat():
     data = request.get_json()
     user_input = data.get("message", "").strip()
-    
     if not user_input:
         return jsonify({"reply": "Please provide a message"}), 400
 
-    # Check if Groq client is initialized
-    if not client:
-        return jsonify({
-            "reply": "❌ Error: Groq API client not initialized. Check your API key."
-        }), 500
-
     try:
-        print(f"🔄 Processing chat request: {user_input[:50]}...")
-        
-        response = _groq_chat(messages=[{
-            "role": "user", 
-            "content": user_input
-        }])
-        
+        # Use ONLY the correct current model - no fallbacks
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",  # ✅ Current working model
+            messages=[{"role": "user", "content": user_input}],
+            max_tokens=1000,
+            temperature=0.7
+        )
         reply = response.choices[0].message.content
-        model_used = getattr(response, 'model', 'unknown')
-        
-        print(f"✅ Chat response generated using model: {model_used}")
-        
-        return jsonify({
-            "reply": reply,
-            "model": model_used
-        })
-        
     except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Chat error: {error_msg}")
-        
-        # Return more specific error messages
-        if "API key" in error_msg or "unauthorized" in error_msg.lower():
-            reply = "❌ Error: Invalid or missing Groq API key"
-        elif "rate_limit" in error_msg.lower():
-            reply = "❌ Error: Groq API rate limit exceeded. Please try again later."
-        elif "quota" in error_msg.lower():
-            reply = "❌ Error: Groq API quota exceeded"
-        else:
-            reply = f"❌ Error: {error_msg}"
-        
-        return jsonify({"reply": reply}), 500
+        reply = f"❌ Error: {str(e)}"
+
+    print(f"[CHAT] {user_input} -> {reply}")
+    return jsonify({"reply": reply})
 
 # -------------------- PDF UPLOAD --------------------
 @app.route("/upload", methods=["POST"])
