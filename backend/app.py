@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from groq import Groq
+import google.generativeai as genai
 import fitz  # PyMuPDF
 from Model import semantic_search  # your semantic search function
 import time
@@ -13,60 +13,77 @@ load_dotenv("key.env")
 app = Flask(__name__)
 CORS(app)  # Allow all origins for deployment
 
-# Initialize Groq client with better error handling
+# Initialize Gemini client with better error handling
 try:
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    print(f"✅ Groq client initialized")
+    # Use your API key directly or from environment
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBys3qxTdGbxJFwXDPLnaP9VUcOO7fvCxU")
+    genai.configure(api_key=GEMINI_API_KEY)
+    
+    # Test the connection
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    print(f"✅ Gemini client initialized with model: gemini-1.5-flash")
+    client = True
 except Exception as e:
-    print(f"❌ Failed to initialize Groq client: {e}")
-    client = None
+    print(f"❌ Failed to initialize Gemini client: {e}")
+    client = False
 
-# Updated model candidates with correct model names
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-_MODEL_CANDIDATES = [
-    "llama-3.1-8b-instant",
-    "llama3-8b-8192", 
-    "mixtral-8x7b-32768",
-    "llama3-70b-8192"
-]
+# Gemini model configuration
+GEMINI_MODEL = "gemini-1.5-flash"
+_AVAILABLE_MODELS = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
 
-def _groq_chat(messages):
+def _get_available_models():
+    return _AVAILABLE_MODELS
+
+def _gemini_chat(messages):
     if not client:
-        raise RuntimeError("Groq client not initialized - check your API key")
+        raise RuntimeError("Gemini client not initialized - check your API key")
     
-    last_error = None
-    
-    for model_name in _MODEL_CANDIDATES:
-        try:
-            print(f"🔄 Trying model: {model_name}")
-            
-            resp = client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                max_tokens=1000,  # Add max tokens limit
-                temperature=0.7   # Add temperature for consistency
+    try:
+        # Initialize the model
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        
+        # Convert messages to Gemini format
+        if len(messages) == 1 and messages[0].get("role") == "user":
+            # Simple user message
+            prompt = messages[0]["content"]
+        else:
+            # Convert conversation format
+            prompt = ""
+            for msg in messages:
+                if msg["role"] == "system":
+                    prompt += f"System: {msg['content']}\n"
+                elif msg["role"] == "user":
+                    prompt += f"User: {msg['content']}\n"
+                elif msg["role"] == "assistant":
+                    prompt += f"Assistant: {msg['content']}\n"
+        
+        print(f"🔄 Using Gemini model: {GEMINI_MODEL}")
+        
+        # Generate response
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                max_output_tokens=1000,
+                temperature=0.7,
             )
-            
-            print(f"✅ Success with model: {model_name}")
-            return resp
-            
-        except Exception as e:
-            error_msg = str(e)
-            print(f"❌ Model {model_name} failed: {error_msg}")
-            last_error = e
-            
-            # If it's a 404 error, the model doesn't exist - try next one
-            if "404" in error_msg or "Not Found" in error_msg:
-                continue
-            # If it's a rate limit or quota issue, try next model
-            elif "rate_limit" in error_msg.lower() or "quota" in error_msg.lower():
-                continue
-            # For other errors, also try next model
-            else:
-                continue
-    
-    # If all models failed, raise the last error with more context
-    raise RuntimeError(f"All Groq models failed. Last error: {last_error}")
+        )
+        
+        print(f"✅ Success with Gemini model: {GEMINI_MODEL}")
+        
+        # Create response object similar to Groq format
+        class GeminiResponse:
+            def __init__(self, text, model_name):
+                self.choices = [type('obj', (object,), {
+                    'message': type('obj', (object,), {'content': text})()
+                })()]
+                self.model = model_name
+        
+        return GeminiResponse(response.text, GEMINI_MODEL)
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Gemini model failed: {error_msg}")
+        raise RuntimeError(f"Gemini API failed: {error_msg}")
 
 # Add health check endpoint for Azure App Service
 @app.route("/health", methods=["GET"])
@@ -74,18 +91,32 @@ def health_check():
     return jsonify({
         "status": "healthy", 
         "message": "BioSeekAI backend is running",
-        "groq_client": "initialized" if client else "failed",
-        "models": _MODEL_CANDIDATES
+        "gemini_client": "initialized" if client else "failed",
+        "model": GEMINI_MODEL,
+        "available_models": _get_available_models()
     })
 
-# Test endpoint to check Groq API
-@app.route("/test-groq", methods=["GET"])
-def test_groq():
+# Endpoint to list available Gemini models
+@app.route("/gemini-models", methods=["GET"])
+def gemini_models():
     try:
         if not client:
-            return jsonify({"error": "Groq client not initialized"}), 500
+            return jsonify({"error": "Gemini client not initialized"}), 500
+        return jsonify({
+            "available_models": _get_available_models(),
+            "current_model": GEMINI_MODEL
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Test endpoint to check Gemini API
+@app.route("/test-gemini", methods=["GET"])
+def test_gemini():
+    try:
+        if not client:
+            return jsonify({"error": "Gemini client not initialized"}), 500
         
-        response = _groq_chat([{"role": "user", "content": "Hello, say 'API working'"}])
+        response = _gemini_chat([{"role": "user", "content": "Hello, say 'API working'"}])
         reply = response.choices[0].message.content
         
         return jsonify({
@@ -104,23 +135,49 @@ def test_groq():
 def chat():
     data = request.get_json()
     user_input = data.get("message", "").strip()
+    
     if not user_input:
         return jsonify({"reply": "Please provide a message"}), 400
 
-    try:
-        # Use ONLY the correct current model - no fallbacks
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",  # ✅ Current working model
-            messages=[{"role": "user", "content": user_input}],
-            max_tokens=1000,
-            temperature=0.7
-        )
-        reply = response.choices[0].message.content
-    except Exception as e:
-        reply = f"❌ Error: {str(e)}"
+    # Check if Gemini client is initialized
+    if not client:
+        return jsonify({
+            "reply": "❌ Error: Gemini API client not initialized. Check your API key."
+        }), 500
 
-    print(f"[CHAT] {user_input} -> {reply}")
-    return jsonify({"reply": reply})
+    try:
+        print(f"🔄 Processing chat request: {user_input[:50]}...")
+        
+        response = _gemini_chat(messages=[{
+            "role": "user", 
+            "content": user_input
+        }])
+        
+        reply = response.choices[0].message.content
+        model_used = getattr(response, 'model', 'unknown')
+        
+        print(f"✅ Chat response generated using model: {model_used}")
+        
+        return jsonify({
+            "reply": reply,
+            "model": model_used
+        })
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Chat error: {error_msg}")
+        
+        # Return more specific error messages
+        if "API key" in error_msg or "unauthorized" in error_msg.lower():
+            reply = "❌ Error: Invalid or missing Gemini API key"
+        elif "rate_limit" in error_msg.lower() or "quota" in error_msg.lower():
+            reply = "❌ Error: Gemini API rate limit exceeded. Please try again later."
+        elif "blocked" in error_msg.lower():
+            reply = "❌ Error: Content was blocked by Gemini safety filters"
+        else:
+            reply = f"❌ Error: {error_msg}"
+        
+        return jsonify({"reply": reply}), 500
 
 # -------------------- PDF UPLOAD --------------------
 @app.route("/upload", methods=["POST"])
@@ -136,7 +193,7 @@ def upload():
         return jsonify({"summary": "⚠ No text found in the PDF."})
 
     try:
-        response = _groq_chat(
+        response = _gemini_chat(
             messages=[
                 {
                     "role": "system",
@@ -192,6 +249,6 @@ def search():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"🚀 Starting BioSeekAI backend on port {port}")
-    print(f"📊 Available Groq models: {_MODEL_CANDIDATES}")
+    print(f"📊 Using Gemini model: {GEMINI_MODEL}")
     app.run(host="0.0.0.0", port=port, debug=False)
 
