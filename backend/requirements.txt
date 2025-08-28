@@ -1,12 +1,7 @@
-sentence-transformers
-torch
 requests
-python-dotenv
-requests
-sentence-transformers
-torch
 python-dotenv
 flask
 flask-cors
 groq
 pymupdf
+numpy

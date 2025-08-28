@@ -18,6 +18,11 @@ CORS(app)  # Allow all origins for deployment
 # Initialize Groq client
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
+# Add health check endpoint for Azure App Service
+@app.route("/health", methods=["GET"])
+def health_check():
+    return jsonify({"status": "healthy", "message": "BioSeekAI backend is running"})
+
 # -------------------- CHAT --------------------
 @app.route("/chat", methods=["POST"])
 def chat():

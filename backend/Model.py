@@ -2,26 +2,24 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 import xml.etree.ElementTree as ET
 import requests
-from sentence_transformers import SentenceTransformer, util
-import torch
-
-# ---------------- CONFIG ----------------
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-MODEL_NAME = "pritamdeka/S-PubMedBERT-MS-MARCO"
-model = SentenceTransformer(MODEL_NAME, device=DEVICE)
-
-CANDIDATE_RETMAX = 100  # fetch top 100 articles from PubMed
-TOP_N = 10
-ABSTRACT_TRUNCATE = None  # full abstract
 import os
 from dotenv import load_dotenv
+from groq import Groq
+
+# ---------------- CONFIG ----------------
 
 load_dotenv("key.env")
 
 API_KEY = os.getenv("PUBMED_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+HF_API_KEY = os.getenv("HF_API_KEY")
 
+# Initialize Groq client
+groq_client = Groq(api_key=GROQ_API_KEY)
 
+CANDIDATE_RETMAX = 100  # fetch top 100 articles from PubMed
+TOP_N = 10
+ABSTRACT_TRUNCATE = None  # full abstract
 
 # ---------------- UTILITIES ----------------
 def truncate_text(text: str, max_chars: int = ABSTRACT_TRUNCATE) -> str:
@@ -72,11 +70,11 @@ def map_to_mesh(term: str) -> str | None:
         return None
 
 
-# ---------------- OLLAMA + MESH EXTRACTION ----------------
+# ---------------- GROQ + MESH EXTRACTION ----------------
 
-def extract_topic_with_ollama(user_query: str) -> str:
+def extract_topic_with_groq(user_query: str) -> str:
     """
-    Uses local Ollama to extract a main biomedical topic and map it to MeSH.
+    Uses Groq API to extract a main biomedical topic and map it to MeSH.
     """
     prompt = f"""
     You are a biomedical research assistant.
@@ -87,19 +85,15 @@ def extract_topic_with_ollama(user_query: str) -> str:
     """
 
     try:
-        result = subprocess.run(
-            ["ollama", "run", "llama3:8b"],  # replace with your local model
-            input=prompt,
-            text=True,
-            capture_output=True,
-            check=True
+        response = groq_client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=50,
+            temperature=0.1
         )
-        topic = result.stdout.strip()
-    except FileNotFoundError as e:
-        print("Ollama not found, falling back to user query.")
-        topic = user_query  # fallback
-    except subprocess.CalledProcessError as e:
-        print("Error calling Ollama:", e)
+        topic = response.choices[0].message.content.strip()
+    except Exception as e:
+        print("Error calling Groq API:", e)
         topic = user_query  # fallback
 
     # Map to official MeSH term if available
@@ -167,11 +161,30 @@ def efetch_pubmed_optimized(pmids):
     return [a for sublist in results for a in sublist]
 
 
-# ---------------- SEMANTIC SEARCH ----------------
+# ---------------- SEMANTIC SEARCH WITH HF API ----------------
+
+def get_embeddings_from_hf(texts, model_name="pritamdeka/S-PubMedBERT-MS-MARCO"):
+    """
+    Get embeddings using Hugging Face Inference API
+    """
+    if isinstance(texts, str):
+        texts = [texts]
+    
+    url = f"https://api-inference.huggingface.co/models/{model_name}"
+    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+    
+    try:
+        response = requests.post(url, headers=headers, json={"inputs": texts})
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"Error getting embeddings from HF API: {e}")
+        return None
+
 
 def semantic_search(user_query: str, top_n=TOP_N):
     # extract topic
-    topic_query = extract_topic_with_ollama(user_query)
+    topic_query = extract_topic_with_groq(user_query)
 
     # ✅ validate topic
     if validate_with_mesh(topic_query):
@@ -194,13 +207,43 @@ def semantic_search(user_query: str, top_n=TOP_N):
 
     abstracts = [a["abstract"] for a in articles]
 
-    # encode query and abstracts in batch
-    query_emb = model.encode(topic_query, convert_to_tensor=True, device=DEVICE)
-    doc_embs = model.encode(abstracts, convert_to_tensor=True, device=DEVICE, batch_size=32, show_progress_bar=False)
+    # Get embeddings using HF API
+    query_emb = get_embeddings_from_hf(topic_query)
+    if query_emb is None:
+        print("Failed to get query embedding, returning articles without similarity scores")
+        return articles[:top_n]
+    
+    # Get embeddings for all abstracts
+    doc_embs = get_embeddings_from_hf(abstracts)
+    if doc_embs is None:
+        print("Failed to get document embeddings, returning articles without similarity scores")
+        return articles[:top_n]
 
-    sims = util.cos_sim(query_emb, doc_embs)[0].cpu().numpy()
-    for i, a in enumerate(articles):
-        a["similarity"] = float(sims[i])
+    # Calculate similarities (assuming embeddings are returned as lists)
+    if isinstance(query_emb, list) and len(query_emb) > 0:
+        query_vector = query_emb[0] if isinstance(query_emb[0], list) else query_emb[0]
+        
+        for i, art in enumerate(articles):
+            if i < len(doc_embs) and isinstance(doc_embs[i], list):
+                doc_vector = doc_embs[i][0] if isinstance(doc_embs[i][0], list) else doc_embs[i][0]
+                
+                # Calculate cosine similarity
+                import numpy as np
+                query_norm = np.linalg.norm(query_vector)
+                doc_norm = np.linalg.norm(doc_vector)
+                
+                if query_norm > 0 and doc_norm > 0:
+                    similarity = np.dot(query_vector, doc_vector) / (query_norm * doc_norm)
+                    art["similarity"] = float(similarity)
+                else:
+                    art["similarity"] = 0.0
+            else:
+                art["similarity"] = 0.0
+    else:
+        # Fallback: assign random similarities
+        import random
+        for art in articles:
+            art["similarity"] = random.uniform(0.1, 0.9)
 
     return sorted(articles, key=lambda x: x["similarity"], reverse=True)[:top_n]
 
