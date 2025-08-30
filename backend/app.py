@@ -1,113 +1,100 @@
-from flask import Flask, request, jsonify
+# app.py
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-from groq import Groq
-import fitz  # PyMuPDF
-from Model import semantic_search  # your semantic search function
-import time
+import Model     # ✅ import your model.py
 import os
-from dotenv import load_dotenv
+import tempfile
 
-# Load environment variables
-load_dotenv("key.env")
+# ---------------- FLASK APP ----------------
+app = Flask(__name__, static_folder="build")  # serve React build
+CORS(app)  # allow React frontend to call Flask
 
-app = Flask(__name__)
-# app.secret_key = os.getenv("FLASK_SECRET_KEY", "supersecretkey")
+# ---------------- SERVE REACT ----------------
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def serve(path):
+    """
+    Serve React frontend
+    """
+    if path != "" and os.path.exists(os.path.join(app.static_folder, path)):
+        return send_from_directory(app.static_folder, path)
+    return send_from_directory(app.static_folder, "index.html")
 
-CORS(app)  # Allow all origins for deployment
-
-# Initialize Groq client
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-
-# -------------------- CHAT --------------------
-@app.route("/chat", methods=["POST"])
-def chat():
-    data = request.get_json()
-    user_input = data.get("message", "").strip()
-    if not user_input:
-        return jsonify({"reply": "Please provide a message"}), 400
-
-    try:
-        response = client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[{"role": "user", "content": user_input}],
-        )
-        reply = response.choices[0].message.content
-    except Exception as e:
-        reply = f"❌ Error: {str(e)}"
-
-    print(f"[CHAT] {user_input} -> {reply}")
-    return jsonify({"reply": reply})
-
-# -------------------- PDF UPLOAD --------------------
-@app.route("/upload", methods=["POST"])
-def upload():
-    if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
-
-    file = request.files["file"]
-    doc = fitz.open(stream=file.read(), filetype="pdf")
-    text = "".join([page.get_text("text") + "\n" for page in doc])
-
-    if not text.strip():
-        return jsonify({"summary": "⚠ No text found in the PDF."})
-
-    try:
-        response = client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant that summarizes PDF documents."
-                },
-                {"role": "user", "content": f"Summarize this document:\n\n{text[:4000]}"},
-            ],
-        )
-        summary = response.choices[0].message.content
-    except Exception as e:
-        summary = f"❌ Error: {str(e)}"
-
-    print(f"[UPLOAD] File processed: {file.filename}")
-    return jsonify({"summary": summary})
-
-# -------------------- SEMANTIC SEARCH --------------------
+# ---------------- SEARCH ----------------
 @app.route("/search", methods=["POST"])
 def search():
-    start_time = time.time()
-    data = request.get_json(force=True)
-    query = data.get("query", "").strip()
-    if not query:
-        return jsonify({"error": "Missing query"}), 400
-
     try:
-        results = semantic_search(user_query=query, top_n=10)
+        data = request.get_json()
+        query = data.get("query", "").strip()
+        if not query:
+            return jsonify([])   # return empty list directly
 
-        # Shorten abstracts
-        for art in results:
-            abstract = art.get("abstract", "")
-            sentences = abstract.split(". ")
-            art["abstract"] = ". ".join(sentences[:3]) + ("..." if len(sentences) > 3 else "")
-
-        reply_text = (
-            f"Found {len(results)} articles. Top title: {results[0]['title']}" 
-            if results else "No results found."
-        )
-        response_time = round(time.time() - start_time, 2)
-
-        print(f"[SEARCH] Query: {query} | Results: {len(results)} | Time: {response_time}s")
-        return jsonify({
-            "query": query,
-            "results": results,
-            "reply": reply_text,
-            "response_time_sec": response_time
-        })
-
+        # semantic_search ALREADY returns a list of dict articles
+        sorted_articles = Model.semantic_search(query)
+        return jsonify(sorted_articles)   # ✅ return plain list
     except Exception as e:
-        print(f"[SEARCH ERROR] {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# -------------------- MAIN --------------------
-if __name__ == "__main__":
-    # Use 0.0.0.0 to allow external access when deployed
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+# ---------------- CHAT ----------------
+@app.route("/chat", methods=["POST"])
+def chat():
+    try:
+        data = request.get_json()
+        message = data.get("message", "").strip()
+        if not message:
+            return jsonify({"reply": "⚠ Empty message."})
 
+        # use your Llama client to generate a reply
+        response = Model.client.chat_completion(
+            messages=[
+                {"role": "system", "content": "You are Clario AI, a biomedical assistant."},
+                {"role": "user", "content": message}
+            ],
+            max_tokens=300,
+            temperature=0.5
+        )
+
+        reply = response["choices"][0]["message"]["content"].strip() if "choices" in response else "⚠ No response."
+        return jsonify({"reply": reply})
+    except Exception as e:
+        return jsonify({"reply": f"⚠ Error: {str(e)}"}), 500
+
+# ---------------- FILE UPLOAD ----------------
+@app.route("/upload", methods=["POST"])
+def upload():
+    try:
+        if "file" not in request.files:
+            return jsonify({"summary": "⚠ No file uploaded."})
+
+        file = request.files["file"]
+        if not file.filename:
+            return jsonify({"summary": "⚠ Empty filename."})
+
+        # save temporarily
+        temp_path = os.path.join(tempfile.gettempdir(), file.filename)
+        file.save(temp_path)
+
+        # simple text read (can extend for PDF, DOCX, etc.)
+        with open(temp_path, "r", errors="ignore") as f:
+            text = f.read()
+
+        # summarize using Llama client
+        response = Model.client.chat_completion(
+            messages=[
+                {"role": "system", "content": "You are a biomedical assistant. Summarize uploaded research content."},
+                {"role": "user", "content": text[:3000]}  # truncate long files
+            ],
+            max_tokens=250,
+            temperature=0.5
+        )
+
+        summary = response["choices"][0]["message"]["content"].strip() if "choices" in response else "⚠ No summary."
+        return jsonify({"summary": summary})
+    except Exception as e:
+        return jsonify({"summary": f"⚠ Error processing file: {str(e)}"}), 500
+
+# ---------------- RUN ----------------
+if __name__ == "__main__":
+    # Use port from environment variable if deploying
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port, debug=True)
