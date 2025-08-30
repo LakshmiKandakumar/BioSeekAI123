@@ -1,6 +1,7 @@
 sentence-transformers
 torch
 requests
+huggingface_hub
 python-dotenv
 requests
 sentence-transformers
@@ -10,3 +11,4 @@ flask
 flask-cors
 groq
 pymupdf
+biopython
