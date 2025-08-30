@@ -1,7 +1,14 @@
+sentence-transformers
+torch
 requests
+huggingface_hub
+python-dotenv
+requests
+sentence-transformers
+torch
 python-dotenv
 flask
 flask-cors
-google-generativeai
+groq
 pymupdf
-numpy
+biopython
