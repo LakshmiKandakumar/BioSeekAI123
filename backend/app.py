@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv("key.env")
 
-app = Flask(_name_)
+app = Flask(__name__)
 CORS(app)  # Allow all origins for deployment
 
 # Initialize Gemini client with better error handling
@@ -72,7 +72,7 @@ def _gemini_chat(messages):
         
         # Create response object similar to Groq format
         class GeminiResponse:
-            def _init_(self, text, model_name):
+            def __init__(self, text, model_name):
                 self.choices = [type('obj', (object,), {
                     'message': type('obj', (object,), {'content': text})()
                 })()]
@@ -246,8 +246,9 @@ def search():
         return jsonify({"error": str(e)}), 500
 
 # -------------------- MAIN --------------------
-if _name_ == "_main_":
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"🚀 Starting BioSeekAI backend on port {port}")
     print(f"📊 Using Gemini model: {GEMINI_MODEL}")
     app.run(host="0.0.0.0", port=port, debug=False)
+
