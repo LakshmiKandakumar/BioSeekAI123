@@ -1,4 +1,3 @@
-# biomed_search.py
 import os
 import requests
 import torch
@@ -7,13 +6,11 @@ from concurrent.futures import ThreadPoolExecutor
 from huggingface_hub import InferenceClient
 from sentence_transformers import SentenceTransformer, util
 from dotenv import load_dotenv
+from typing import Optional, Tuple
 
 # ---------------- CONFIGURATION ----------------
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
 MODEL_NAME = "pritamdeka/S-PubMedBERT-MS-MARCO"
-model = SentenceTransformer(MODEL_NAME, device=DEVICE)
-
 CANDIDATE_RETMAX = 100
 TOP_N = 10
 ABSTRACT_WORD_LIMIT = 100
@@ -23,10 +20,24 @@ load_dotenv("key.env")
 API_KEY = os.getenv("PUBMED_API_KEY")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-client = InferenceClient(
-    model="meta-llama/Meta-Llama-3.1-8B-Instruct",
-    token=HF_TOKEN,
-)
+# Lazy-load models to reduce deployment startup time
+_model = None
+_client = None
+
+def get_model():
+    global _model
+    if _model is None:
+        _model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+    return _model
+
+def get_client():
+    global _client
+    if _client is None:
+        _client = InferenceClient(
+            model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+            token=HF_TOKEN,
+        )
+    return _client
 
 # ---------------- UTILITY FUNCTIONS ----------------
 def truncate_abstract_words(text: str, max_words: int = ABSTRACT_WORD_LIMIT) -> str:
@@ -35,7 +46,7 @@ def truncate_abstract_words(text: str, max_words: int = ABSTRACT_WORD_LIMIT) -> 
     words = text.split()
     return text if len(words) <= max_words else " ".join(words[:max_words]) + "..."
 
-def map_to_mesh(term: str) -> str | None:
+def map_to_mesh(term: str) -> Optional[str]:
     """Map term to MeSH descriptor using NCBI E-utilities."""
     url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
     params = {"db": "mesh", "term": term, "retmode": "json", "retmax": 1, "api_key": API_KEY}
@@ -54,7 +65,7 @@ def map_to_mesh(term: str) -> str | None:
         return None
 
 # ---------------- LLM FUNCTIONS ----------------
-def extract_topic_with_llama_hf(user_query: str) -> tuple[str, str]:
+def extract_topic_with_llama_hf(user_query: str) -> Tuple[str, str]:
     """Use Llama 3.1 to extract main topic and expanded query."""
     system_message = "You are an expert biomedical research assistant with deep knowledge of medical terminology and MeSH vocabulary."
     user_message = f"""Analyze this biomedical query and provide exactly the following format:
@@ -65,6 +76,7 @@ Main Topic: [single most important biomedical concept]
 Expanded Query: [enhanced version with synonyms and MeSH-compatible terms]"""
 
     try:
+        client = get_client()
         response = client.chat_completion(
             messages=[
                 {"role": "system", "content": system_message},
@@ -157,6 +169,7 @@ def semantic_search(user_query: str, top_n=TOP_N):
         return []
 
     abstracts = [a["abstract"] for a in articles]
+    model = get_model()
     query_emb = model.encode(extracted_topic, convert_to_tensor=True, device=DEVICE)
     doc_embs = model.encode(abstracts, convert_to_tensor=True, device=DEVICE, batch_size=32, show_progress_bar=False)
     sims = util.cos_sim(query_emb, doc_embs)[0].cpu().numpy()
@@ -168,9 +181,3 @@ def semantic_search(user_query: str, top_n=TOP_N):
         {"title": a["title"], "authors": a["authors"], "year": a["year"], "abstract": a["abstract"], "link": a["link"]}
         for a in sorted_articles
     ]
-
-# if __name__ == "__main__":
-#     query = input("Enter biomedical query: ")
-#     results = semantic_search(query)
-#     for r in results:
-#         print(f"\n{r['title']} ({r['year']})\n{r['authors']}\n{r['abstract']}\n{r['link']}")
