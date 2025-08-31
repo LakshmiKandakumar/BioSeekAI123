@@ -287,7 +287,7 @@ def semantic_search(user_query: str, top_n=TOP_N):
 
 # ---------------- TEST ----------------
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     import time
 
     query = input("Enter your biomedical query: ")
